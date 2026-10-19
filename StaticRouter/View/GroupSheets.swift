@@ -16,6 +16,7 @@ struct AddGroupSheet: View {
 
     @State private var name = ""
     @State private var iconName = "folder"
+    @State private var saveErrorMessage: String? = nil
     private var isValid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
 
     private let availableIcons = [
@@ -73,6 +74,7 @@ struct AddGroupSheet: View {
         }
         .frame(width: 280)
         .padding(20)
+        .persistenceErrorAlert(message: $saveErrorMessage)
     }
 
     private func save() {
@@ -84,8 +86,13 @@ struct AddGroupSheet: View {
             sortOrder: groups.count
         )
         modelContext.insert(newGroup)
-        try? modelContext.save()
-        dismiss()
+        do {
+            try modelContext.save()
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            saveErrorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -99,6 +106,7 @@ struct AssignGroupsSheet: View {
     @Query(sort: \RouteGroup.sortOrder) private var allGroups: [RouteGroup]
 
     @State private var selectedGroupIDs: Set<PersistentIdentifier> = []
+    @State private var saveErrorMessage: String? = nil
 
     init(rule: RouteRule) {
         self.rule = rule
@@ -154,25 +162,30 @@ struct AssignGroupsSheet: View {
             // Pre-select current groups
             selectedGroupIDs = Set(rule.groups.map(\.persistentModelID))
         }
+        .persistenceErrorAlert(message: $saveErrorMessage)
     }
 
     private func save() {
-        // Clear existing associations from both sides
-        for group in rule.groups {
-            group.routes.removeAll { $0.persistentModelID == rule.persistentModelID }
-        }
-        rule.groups.removeAll()
-
-        // Re-establish selected associations
-        for group in allGroups where selectedGroupIDs.contains(group.persistentModelID) {
-            rule.groups.append(group)
-            if !group.routes.contains(where: { $0.persistentModelID == rule.persistentModelID }) {
-                group.routes.append(rule)
+        do {
+            let ruleID = rule.id
+            let descriptor = FetchDescriptor<RouteRule>(
+                predicate: #Predicate<RouteRule> { candidate in
+                    candidate.id == ruleID
+                }
+            )
+            guard let persistedRule = try modelContext.fetch(descriptor).first else {
+                throw PersistenceError.objectNoLongerExists
             }
-        }
 
-        try? modelContext.save()
-        dismiss()
+            persistedRule.groups = allGroups.filter {
+                selectedGroupIDs.contains($0.persistentModelID)
+            }
+            try modelContext.save()
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            saveErrorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -184,6 +197,7 @@ struct RenameGroupSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @State private var name: String
+    @State private var saveErrorMessage: String? = nil
 
     init(group: RouteGroup) {
         self.group = group
@@ -213,13 +227,47 @@ struct RenameGroupSheet: View {
         }
         .padding(20)
         .frame(width: 280)
+        .persistenceErrorAlert(message: $saveErrorMessage)
     }
 
     private func save() {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        group.name = trimmed
-        try? modelContext.save()
-        dismiss()
+        do {
+            let groupID = group.id
+            let descriptor = FetchDescriptor<RouteGroup>(
+                predicate: #Predicate<RouteGroup> { candidate in
+                    candidate.id == groupID
+                }
+            )
+            guard let persistedGroup = try modelContext.fetch(descriptor).first else {
+                throw PersistenceError.objectNoLongerExists
+            }
+            persistedGroup.name = trimmed
+            try modelContext.save()
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            saveErrorMessage = error.localizedDescription
+        }
+    }
+}
+
+@available(macOS 14, *)
+private extension View {
+    func persistenceErrorAlert(message: Binding<String?>) -> some View {
+        alert(
+            String(localized: "persistence.save_error.title"),
+            isPresented: Binding(
+                get: { message.wrappedValue != nil },
+                set: { if !$0 { message.wrappedValue = nil } }
+            )
+        ) {
+            Button(String(localized: "OK"), role: .cancel) {
+                message.wrappedValue = nil
+            }
+        } message: {
+            Text(message.wrappedValue ?? "")
+        }
     }
 }

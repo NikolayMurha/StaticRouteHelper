@@ -17,6 +17,23 @@
 "helper.banner.bless_upgrade.message" = "A modern deployment method is available. Consider switching to SMAppService in Settings.";
 "helper.banner.pending_approval.message" = "Helper installed, but the background switch is off. Enable it in System Settings > Login Items & Extensions.";
 
+/* ── Menu Bar Extra / Quit ── */
+"tray.routes" = "Routes";
+"tray.open" = "Open Static Router";
+"tray.groups" = "Groups";
+"tray.no_routes" = "No routes configured";
+"tray.no_groups" = "No groups configured";
+"tray.quit" = "Quit Static Router…";
+"tray.error.title" = "Route Operation Failed";
+"quit.confirm.title" = "Quit Static Router?";
+"quit.confirm.message" = "%lld active route(s) will be disabled before the app quits.";
+"quit.confirm.disable_and_quit" = "Disable Routes and Quit";
+"quit.confirm.cancel" = "Cancel";
+"quit.failure.title" = "Couldn’t Quit Safely";
+"quit.failure.message" = "Some routes could not be disabled. Keep Static Router running and try again, or force quit. If you force quit, active routes may remain in the system.\n\n%@";
+"quit.failure.keep_running" = "Keep Running";
+"quit.failure.force_quit" = "Force Quit";
+
 /* ── RouteListView ── */
 "route.list.all_routes.title" = "All Routes";
 "route.list.stats" = "%lld routes · %lld active";
@@ -171,3 +188,9 @@
 "about.license" = "StaticRouteHelper is licensed under the Apache License 2.0.";
 "about.copyright" = "Copyright © 2021, Derek Jing";
 "about.homepage.button" = "Project Home Page";
+
+/* ── Persistence ── */
+"persistence.save_error.title" = "Couldn’t Save Changes";
+"helper.error.running_bundle_missing" = "Static Router was moved or removed while it was running. Quit the app and reopen the copy in /Applications before reinstalling the helper. Original path: %@";
+"helper.error.invalid_service_bundle" = "The Static Router app bundle is incomplete, so its privileged helper cannot be installed safely. Reinstall or rebuild the app and try again. Invalid path: %@";
+"helper.error.smappservice_requires_signature" = "SMAppService requires a build signed by an Apple development team. This local build must use SMJobBless.";

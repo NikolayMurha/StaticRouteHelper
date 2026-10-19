@@ -66,6 +66,8 @@
 		AA000001000000000000BB02 /* InstallMethod.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002000000000000BB02 /* InstallMethod.swift */; };
 		AA000001000000000000BB03 /* PrivilegedHelperManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002000000000000BB03 /* PrivilegedHelperManager.swift */; };
 		AA900001000000000000CC01 /* SettingsNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA900002000000000000CC01 /* SettingsNavigator.swift */; };
+		AA900001000000000000DD01 /* PersistenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA900002000000000000DD01 /* PersistenceController.swift */; };
+		AA900001000000000000DD02 /* DataModel.xcdatamodeld in Resources */ = {isa = PBXBuildFile; fileRef = AA900002000000000000DD02 /* DataModel.xcdatamodeld */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXShellScriptBuildPhase section */
@@ -179,6 +181,8 @@
 		AA000002000000000000BB02 /* InstallMethod.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallMethod.swift; sourceTree = "<group>"; };
 		AA000002000000000000BB03 /* PrivilegedHelperManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivilegedHelperManager.swift; sourceTree = "<group>"; };
 		AA900002000000000000CC01 /* SettingsNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsNavigator.swift; sourceTree = "<group>"; };
+		AA900002000000000000DD01 /* PersistenceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceController.swift; sourceTree = "<group>"; };
+		AA900002000000000000DD02 /* DataModel.xcdatamodeld */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodeld; path = DataModel.xcdatamodeld; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -212,6 +216,7 @@
 				AA000002000000000000AA03 /* RouteValidator.swift */,
 				AA000002000000000000AA30 /* RouteRuleMO.swift */,
 				AA000002000000000000AA33 /* StaticRouteLegacy.xcdatamodeld */,
+				AA900002000000000000DD02 /* DataModel.xcdatamodeld */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -379,6 +384,7 @@
 				AA000002000000000000BB02 /* InstallMethod.swift */,
 				AA000002000000000000BB03 /* PrivilegedHelperManager.swift */,
 				AA900002000000000000CC01 /* SettingsNavigator.swift */,
+				AA900002000000000000DD01 /* PersistenceController.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -481,6 +487,7 @@
 				396255FB296C124E00DB6000 /* Localizable.strings in Resources */,
 				39E84C6B260B32BF00776AE7 /* Assets.xcassets in Resources */,
 				AA000001000000000000AA33 /* StaticRouteLegacy.xcdatamodeld in Resources */,
+				AA900001000000000000DD02 /* DataModel.xcdatamodeld in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -519,6 +526,7 @@
 				AA000001000000000000AA21 /* SystemRouteReader.swift in Sources */,
 				AA000001000000000000AA30 /* RouteRuleMO.swift in Sources */,
 				AA000001000000000000AA31 /* LegacyPersistenceStack.swift in Sources */,
+				AA900001000000000000DD01 /* PersistenceController.swift in Sources */,
 				39229F3129700FFF0013B40F /* MainWindow.swift in Sources */,
 				AA000001000000000000AA07 /* SidebarView.swift in Sources */,
 				AA000001000000000000AA08 /* GroupSheets.swift in Sources */,

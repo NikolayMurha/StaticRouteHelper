@@ -24,6 +24,7 @@ struct LegacyRouteListView: View {
     @State private var routeToDelete: RouteRuleMO? = nil
     @State private var activationError: RouterError? = nil
     @State private var showActivationError = false
+    @State private var saveErrorMessage: String? = nil
 
     private var activeCount: Int { routes.filter(\.isActive).count }
 
@@ -114,6 +115,17 @@ struct LegacyRouteListView: View {
             let fallback = String(localized: "route.list.recovery.alert.message")
             Text(routerService.smAppServiceRecoveryState?.errorMessage ?? fallback)
         }
+        .alert(
+            String(localized: "persistence.save_error.title"),
+            isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )
+        ) {
+            Button(String(localized: "OK"), role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "")
+        }
     }
 
     // MARK: - Empty State
@@ -195,7 +207,12 @@ struct LegacyRouteListView: View {
             }
             await MainActor.run {
                 viewContext.delete(mo)
-                try? viewContext.save()
+                do {
+                    try viewContext.save()
+                } catch {
+                    viewContext.rollback()
+                    saveErrorMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -292,6 +309,7 @@ struct LegacyRouteEditSheet: View {
 
     @State private var networkError: String? = nil
     @State private var gatewayError: String? = nil
+    @State private var saveErrorMessage: String? = nil
 
     private var isEditing: Bool { existingMO != nil }
 
@@ -405,6 +423,17 @@ struct LegacyRouteEditSheet: View {
         .padding(20)
         .frame(width: 460)
         .onAppear { populate() }
+        .alert(
+            String(localized: "persistence.save_error.title"),
+            isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )
+        ) {
+            Button(String(localized: "OK"), role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "")
+        }
     }
 
     private var subnetMaskPreview: String {
@@ -441,36 +470,41 @@ struct LegacyRouteEditSheet: View {
         let trimNetwork = network.trimmingCharacters(in: .whitespaces)
         let trimGateway = gateway.trimmingCharacters(in: .whitespaces)
 
-        if let mo = existingMO {
-            let networkChanged = mo.network != trimNetwork
-                || mo.prefixLength != Int16(prefixLength)
-                || mo.gateway != trimGateway
-                || mo.gatewayType != gatewayTypeStr
+        do {
+            if let mo = existingMO {
+                let networkChanged = mo.network != trimNetwork
+                    || mo.prefixLength != Int16(prefixLength)
+                    || mo.gateway != trimGateway
+                    || mo.gatewayType != gatewayTypeStr
 
-            let wasActive = mo.isActive
-            mo.network = trimNetwork
-            mo.prefixLength = Int16(prefixLength)
-            mo.gatewayType = gatewayTypeStr
-            mo.gateway = trimGateway
-            try? viewContext.save()
+                let wasActive = mo.isActive
+                mo.network = trimNetwork
+                mo.prefixLength = Int16(prefixLength)
+                mo.gatewayType = gatewayTypeStr
+                mo.gateway = trimGateway
+                try viewContext.save()
 
-            if wasActive && networkChanged {
-                Task {
-                    try? await routerService.deactivateRouteMO(mo, context: viewContext)
-                    try? await routerService.activateRouteMO(mo, context: viewContext)
+                if wasActive && networkChanged {
+                    Task {
+                        try? await routerService.deactivateRouteMO(mo, context: viewContext)
+                        try? await routerService.activateRouteMO(mo, context: viewContext)
+                    }
                 }
+            } else {
+                RouteRuleMO.create(
+                    in: viewContext,
+                    network: trimNetwork,
+                    prefixLength: Int16(prefixLength),
+                    gatewayType: gatewayTypeStr,
+                    gateway: trimGateway
+                )
+                try viewContext.save()
             }
-        } else {
-            RouteRuleMO.create(
-                in: viewContext,
-                network: trimNetwork,
-                prefixLength: Int16(prefixLength),
-                gatewayType: gatewayTypeStr,
-                gateway: trimGateway
-            )
-            try? viewContext.save()
-        }
 
-        dismiss()
+            dismiss()
+        } catch {
+            viewContext.rollback()
+            saveErrorMessage = error.localizedDescription
+        }
     }
 }

@@ -10,6 +10,11 @@ import SwiftData
 @main
 struct StaticRouteHelperApp: App {
 
+    static let mainWindowID = "main-window"
+
+    @NSApplicationDelegateAdaptor(AppTerminationDelegate.self)
+    private var applicationDelegate
+
     // RouterService uses ObservableObject so @StateObject works on macOS 12+
     @StateObject private var routerService = RouterService()
 
@@ -17,15 +22,8 @@ struct StaticRouteHelperApp: App {
     @StateObject private var legacyStack = LegacyPersistenceStack()
 
     var body: some Scene {
-        WindowGroup {
-            AppRootView()
-                .environmentObject(routerService)
-                .environmentObject(legacyStack)
-                .environment(\.managedObjectContext, legacyStack.viewContext)
-                .task { await onStartup() }
-                .onReceive(NotificationCenter.default.publisher(for: .routeDidChange)) { note in
-                    handleRouteChange(note)
-                }
+        WindowGroup(id: Self.mainWindowID) {
+            appRootView
         }
         .commands { MenuBarCommand() }
 
@@ -35,6 +33,36 @@ struct StaticRouteHelperApp: App {
                 .environmentObject(legacyStack)
                 .environment(\.managedObjectContext, legacyStack.viewContext)
         }
+
+        if #available(macOS 13, *) {
+            MenuBarExtra {
+                RouterMenuBarContent()
+                    .environmentObject(routerService)
+                    .environmentObject(legacyStack)
+                    .environment(\.managedObjectContext, legacyStack.viewContext)
+            } label: {
+                Label("Static Router", systemImage: "network")
+                    .accessibilityLabel("Static Router")
+            }
+            .menuBarExtraStyle(.menu)
+        }
+    }
+
+    private var appRootView: some View {
+        AppRootView()
+            .environmentObject(routerService)
+            .environmentObject(legacyStack)
+            .environment(\.managedObjectContext, legacyStack.viewContext)
+            .onAppear {
+                applicationDelegate.configure(
+                    routerService: routerService,
+                    legacyStack: legacyStack
+                )
+            }
+            .task { await onStartup() }
+            .onReceive(NotificationCenter.default.publisher(for: .routeDidChange)) { note in
+                handleRouteChange(note)
+            }
     }
 
     // MARK: - Startup
@@ -60,9 +88,13 @@ struct StaticRouteHelperApp: App {
         await routerService.refreshSystemRoutes()
 
         let descriptor = FetchDescriptor<RouteRule>()
-        if let rules = try? context.fetch(descriptor) {
+        do {
+            let rules = try context.fetch(descriptor)
             RouteStateCalibrator.calibrate(rules: rules, systemRoutes: routerService.systemRoutes)
-            try? context.save()
+            try context.save()
+        } catch {
+            context.rollback()
+            print("[Persistence] Startup route calibration could not be saved: \(error)")
         }
     }
 
@@ -72,38 +104,57 @@ struct StaticRouteHelperApp: App {
     private func migrateLegacyStoreIfNeeded14(into context: ModelContext) {
         guard legacyStack.storeFileExists else { return }
 
-        let routeData = legacyStack.fetchAllRouteData()
+        let routeData: [[String: Any]]
+        do {
+            routeData = try legacyStack.fetchAllRouteData()
+        } catch {
+            print("[Migration] Could not read macOS 12–13 store; preserving it: \(error)")
+            return
+        }
         guard !routeData.isEmpty else {
             legacyStack.deleteLegacyStoreFiles()
             return
         }
 
-        for data in routeData {
-            guard
-                let network = data["network"] as? String,
-                let prefixLength = data["prefixLength"] as? Int,
-                let gatewayTypeRaw = data["gatewayType"] as? String,
-                let gateway = data["gateway"] as? String
-            else { continue }
+        do {
+            let existingRules = try context.fetch(FetchDescriptor<RouteRule>())
+            var existingIDs = Set(existingRules.map(\.id))
 
-            let gatewayType: GatewayType = gatewayTypeRaw == "ipAddress" ? .ipAddress : .interface
-            let isActive = data["isActive"] as? Bool ?? false
-            let createdAt = data["createdAt"] as? Date ?? Date()
+            for data in routeData {
+                guard
+                    let id = data["id"] as? UUID,
+                    let network = data["network"] as? String,
+                    let prefixLength = data["prefixLength"] as? Int,
+                    let gatewayTypeRaw = data["gatewayType"] as? String,
+                    let gateway = data["gateway"] as? String
+                else {
+                    throw PersistenceError.invalidLegacyRecord
+                }
+                guard existingIDs.insert(id).inserted else { continue }
 
-            let rule = RouteRule(
-                network: network,
-                prefixLength: prefixLength,
-                gatewayType: gatewayType,
-                gateway: gateway,
-                isActive: isActive,
-                groups: [],
-                createdAt: createdAt
-            )
-            context.insert(rule)
+                let gatewayType: GatewayType = gatewayTypeRaw == "ipAddress" ? .ipAddress : .interface
+                let isActive = data["isActive"] as? Bool ?? false
+                let createdAt = data["createdAt"] as? Date ?? Date()
+
+                let rule = RouteRule(
+                    id: id,
+                    network: network,
+                    prefixLength: prefixLength,
+                    gatewayType: gatewayType,
+                    gateway: gateway,
+                    isActive: isActive,
+                    groups: [],
+                    createdAt: createdAt
+                )
+                context.insert(rule)
+            }
+
+            try context.save()
+            legacyStack.deleteLegacyStoreFiles()
+        } catch {
+            context.rollback()
+            print("[Migration] Could not save macOS 12–13 routes; preserving the source store: \(error)")
         }
-
-        try? context.save()
-        legacyStack.deleteLegacyStoreFiles()
     }
 
     // MARK: - Route Change Notification Handler
@@ -119,7 +170,13 @@ struct StaticRouteHelperApp: App {
 
         let context = Self.sharedModelContainer.mainContext
         let descriptor = FetchDescriptor<RouteRule>()
-        guard let rules = try? context.fetch(descriptor) else { return }
+        let rules: [RouteRule]
+        do {
+            rules = try context.fetch(descriptor)
+        } catch {
+            print("[Persistence] Could not fetch routes after a system route change: \(error)")
+            return
+        }
 
         var changed = false
         for rule in rules {
@@ -129,19 +186,24 @@ struct StaticRouteHelperApp: App {
                 changed = true
             }
         }
-        if changed { try? context.save() }
+        if changed {
+            do {
+                try context.save()
+            } catch {
+                context.rollback()
+                print("[Persistence] Could not save route state update: \(error)")
+            }
+        }
     }
 
     // MARK: - SwiftData Container
 
     @available(macOS 14, *)
     static let sharedModelContainer: ModelContainer = {
-        let schema = Schema([RouteRule.self, RouteGroup.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
-            return try ModelContainer(for: schema, configurations: [config])
+            return try PersistenceController.makeModelContainer()
         } catch {
-            fatalError("ModelContainer 初始化失败：\(error)")
+            fatalError("ModelContainer initialization failed: \(error)")
         }
     }()
 }

@@ -14,6 +14,7 @@ import SecureXPC
 import Blessed
 import Authorized
 import ServiceManagement
+import Security
 import OSLog
 
 // MARK: - PrivilegedHelperManager
@@ -40,11 +41,34 @@ final class PrivilegedHelperManager: ObservableObject {
     /// Ordered list of installation methods available on the current OS.
     /// The first element is the most preferred method.
     var supportedMethods: [InstallMethod] {
-        if #available(macOS 14, *) {
+        if #available(macOS 14, *), isSMAppServiceSupported {
             return [.smAppService, .smJobBless]
         } else {
             return [.smJobBless]
         }
+    }
+
+    /// SMAppService launch constraints reject ad-hoc signed bundled daemons on
+    /// current macOS releases. Only offer this path when the running app has a
+    /// real signing team; local ad-hoc builds must use SMJobBless instead.
+    var isSMAppServiceSupported: Bool {
+        guard #available(macOS 14, *) else { return false }
+        guard let executableURL = Bundle.main.executableURL else { return false }
+
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &staticCode) == errSecSuccess,
+              let staticCode else {
+            return false
+        }
+
+        var signingInformation: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, [], &signingInformation) == errSecSuccess,
+              let information = signingInformation as? [CFString: Any],
+              let teamIdentifier = information[kSecCodeInfoTeamIdentifier] as? String else {
+            return false
+        }
+
+        return !teamIdentifier.isEmpty
     }
 
     // MARK: - Private
@@ -233,12 +257,73 @@ final class PrivilegedHelperManager: ObservableObject {
 
     // MARK: - install(method:)
 
+    /// Verifies that the running app bundle still contains the launch daemon plist and
+    /// executable that SMAppService will resolve through `BundleProgram`.
+    ///
+    /// Moving or deleting an app while it is running leaves `Bundle.main.bundleURL`
+    /// pointing at the old location. On macOS 26, calling `register()` in that state can
+    /// crash inside ServiceManagement instead of returning an error.
+    func validateSMAppServiceBundleForRegistration() throws {
+        let fileManager = FileManager.default
+        let bundleURL = Bundle.main.bundleURL.standardizedFileURL
+
+        guard
+            let appExecutableURL = Bundle.main.executableURL?.standardizedFileURL,
+            fileManager.isExecutableFile(atPath: appExecutableURL.path)
+        else {
+            logger.error("SMAppService preflight failed: running app executable is missing from \(bundleURL.path, privacy: .public)")
+            throw PrivilegedHelperError.runningApplicationBundleUnavailable(bundleURL.path)
+        }
+
+        let plistName = "\(constants.appServiceLabel).plist"
+        let plistURL = bundleURL
+            .appendingPathComponent("Contents/Library/LaunchDaemons", isDirectory: true)
+            .appendingPathComponent(plistName, isDirectory: false)
+
+        guard
+            let plistData = try? Data(contentsOf: plistURL),
+            let plist = try? PropertyListSerialization.propertyList(
+                from: plistData,
+                options: [],
+                format: nil
+            ) as? [String: Any],
+            let bundleProgram = plist["BundleProgram"] as? String,
+            !bundleProgram.isEmpty,
+            !bundleProgram.hasPrefix("/")
+        else {
+            logger.error("SMAppService preflight failed: invalid launch daemon plist at \(plistURL.path, privacy: .public)")
+            throw PrivilegedHelperError.invalidSMAppServiceBundle(plistURL.path)
+        }
+
+        let resolvedBundleURL = bundleURL.resolvingSymlinksInPath()
+        let helperURL = bundleURL
+            .appendingPathComponent(bundleProgram, isDirectory: false)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let bundlePrefix = resolvedBundleURL.path.hasSuffix("/")
+            ? resolvedBundleURL.path
+            : resolvedBundleURL.path + "/"
+
+        guard
+            helperURL.path.hasPrefix(bundlePrefix),
+            fileManager.isExecutableFile(atPath: helperURL.path)
+        else {
+            logger.error("SMAppService preflight failed: BundleProgram is missing or outside the app bundle: \(helperURL.path, privacy: .public)")
+            throw PrivilegedHelperError.invalidSMAppServiceBundle(helperURL.path)
+        }
+    }
+
     /// Installs the helper using the specified method.
     /// - On macOS 14+: executes either SMAppService or SMJobBless based on `method`.
     /// - On macOS 12–13: always uses SMJobBless regardless of `method`.
     @MainActor
     func install(method: InstallMethod) async throws -> InstallResult {
         logger.info("Installing helper via \(method == .smAppService ? "SMAppService" : "SMJobBless", privacy: .public)")
+
+        if method == .smAppService, !isSMAppServiceSupported {
+            logger.error("SMAppService installation rejected because the app has no trusted signing team")
+            return .failed(error: PrivilegedHelperError.smAppServiceRequiresTrustedSignature)
+        }
 
         let result: InstallResult
         if #available(macOS 14, *), method == .smAppService {
@@ -261,6 +346,7 @@ final class PrivilegedHelperManager: ObservableObject {
     @available(macOS 14, *)
     @MainActor
     private func installViaAppService() async throws -> InstallResult {
+        try validateSMAppServiceBundleForRegistration()
         let service = SMAppService.daemon(plistName: "\(constants.appServiceLabel).plist")
         do {
             try service.register()
@@ -545,6 +631,9 @@ final class PrivilegedHelperManager: ObservableObject {
         case xpcUninstallTimedOut(TimeInterval)
         case conflictingServiceRegistration
         case smJobBlessVerificationFailed
+        case runningApplicationBundleUnavailable(String)
+        case invalidSMAppServiceBundle(String)
+        case smAppServiceRequiresTrustedSignature
         var errorDescription: String? {
             switch self {
             case .forcedRemovalFailed(let msg):
@@ -555,6 +644,18 @@ final class PrivilegedHelperManager: ObservableObject {
                 return "SMJobBless install conflict: SMAppService registration is still active"
             case .smJobBlessVerificationFailed:
                 return "SMJobBless install did not become active"
+            case .runningApplicationBundleUnavailable(let path):
+                return String(
+                    format: String(localized: "helper.error.running_bundle_missing"),
+                    path
+                )
+            case .invalidSMAppServiceBundle(let path):
+                return String(
+                    format: String(localized: "helper.error.invalid_service_bundle"),
+                    path
+                )
+            case .smAppServiceRequiresTrustedSignature:
+                return String(localized: "helper.error.smappservice_requires_signature")
             }
         }
     }

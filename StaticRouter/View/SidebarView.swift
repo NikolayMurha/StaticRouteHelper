@@ -17,6 +17,7 @@ struct SidebarView: View {
 
     @State private var groupToRename: RouteGroup? = nil
     @State private var groupToDelete: RouteGroup? = nil
+    @State private var saveErrorMessage: String? = nil
 
     var body: some View {
         List(selection: $selection) {
@@ -77,6 +78,17 @@ struct SidebarView: View {
         } message: {
             Text(String(localized: "sidebar.group.alert.delete.message"))
         }
+        .alert(
+            String(localized: "persistence.save_error.title"),
+            isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )
+        ) {
+            Button(String(localized: "OK"), role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "")
+        }
     }
 
     private func deleteGroup(_ group: RouteGroup) {
@@ -87,14 +99,15 @@ struct SidebarView: View {
             isCurrentlySelected = false
         }
 
-        for route in group.routes {
-            route.groups.removeAll { $0.id == group.id }
-        }
         modelContext.delete(group)
-        try? modelContext.save()
-
-        if isCurrentlySelected {
-            selection = .allRoutes
+        do {
+            try modelContext.save()
+            if isCurrentlySelected {
+                selection = .allRoutes
+            }
+        } catch {
+            modelContext.rollback()
+            saveErrorMessage = error.localizedDescription
         }
     }
 
@@ -139,7 +152,12 @@ struct SidebarView: View {
         for (index, group) in reordered.enumerated() {
             group.sortOrder = index
         }
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            saveErrorMessage = error.localizedDescription
+        }
     }
 }
 

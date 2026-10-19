@@ -99,8 +99,10 @@ struct MainWindow14: View {
                     Text(String(localized: "helper.banner.goto_settings"))
                 }
             }
-        } else if routerService.helperManager.activeMethod == .smJobBless {
-            // Priority 3 (macOS 14+ only): installed via bless, modern method available
+        } else if routerService.helperManager.activeMethod == .smJobBless,
+                  routerService.helperManager.isSMAppServiceSupported {
+            // Priority 3 (macOS 14+ only): suggest the modern method only when
+            // this build has the trusted signing identity required to use it.
             StatusBanner(style: .info, message: "helper.banner.bless_upgrade.message") {
                 SettingsNavigator.Entry {
                     Text(String(localized: "helper.banner.goto_settings"))

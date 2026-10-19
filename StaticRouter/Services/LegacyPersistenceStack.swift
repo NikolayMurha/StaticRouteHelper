@@ -56,9 +56,9 @@ final class LegacyPersistenceStack: ObservableObject {
 
     /// Returns all RouteRuleMO records as plain dictionaries suitable for
     /// reconstructing in a SwiftData context on macOS 14+.
-    func fetchAllRouteData() -> [[String: Any]] {
+    func fetchAllRouteData() throws -> [[String: Any]] {
         let fetchRequest = NSFetchRequest<RouteRuleMO>(entityName: "RouteRuleMO")
-        guard let results = try? viewContext.fetch(fetchRequest) else { return [] }
+        let results = try viewContext.fetch(fetchRequest)
         return results.map { mo in
             [
                 "id": mo.id,

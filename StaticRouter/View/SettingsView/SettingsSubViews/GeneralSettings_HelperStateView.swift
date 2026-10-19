@@ -189,11 +189,12 @@ struct GeneralSettings_HelperStateView: View {
 
     /// Entry point for install button tap.
     private func installOrUpgradeHelper() {
-        if #available(macOS 14, *) {
+        if #available(macOS 14, *), routerService.helperManager.isSMAppServiceSupported {
             // macOS 14+: show method chooser sheet
             showChooser = true
         } else {
-            // macOS 12–13: directly install via SMJobBless
+            // macOS 12–13, and ad-hoc local builds on newer systems: SMJobBless.
+            preferredInstallMethodRaw = InstallMethod.smJobBless.rawStorageValue
             performInstall(method: .smJobBless)
         }
     }

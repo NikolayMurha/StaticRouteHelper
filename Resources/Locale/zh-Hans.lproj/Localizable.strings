@@ -18,6 +18,23 @@
 "helper.banner.bless_upgrade.message" = "有更现代的部署方式可用。建议在设置中切换到 SMAppService。";
 "helper.banner.pending_approval.message" = "帮助程序已安装，但后台运行开关已关闭。请在「系统设置 > 登录项与扩展」中开启。";
 
+/* ── 菜单栏 / 退出 ── */
+"tray.routes" = "路由";
+"tray.open" = "打开 Static Router";
+"tray.groups" = "分组";
+"tray.no_routes" = "尚未配置路由";
+"tray.no_groups" = "尚未配置分组";
+"tray.quit" = "退出 Static Router…";
+"tray.error.title" = "路由操作失败";
+"quit.confirm.title" = "退出 Static Router？";
+"quit.confirm.message" = "退出应用前将停用 %lld 条活动路由。";
+"quit.confirm.disable_and_quit" = "停用路由并退出";
+"quit.confirm.cancel" = "取消";
+"quit.failure.title" = "无法安全退出";
+"quit.failure.message" = "部分路由无法停用。你可以让 Static Router 继续运行并重试，或强制退出。强制退出后，活动路由可能仍保留在系统中。\n\n%@";
+"quit.failure.keep_running" = "继续运行";
+"quit.failure.force_quit" = "强制退出";
+
 /* ── RouteListView ── */
 "route.list.all_routes.title" = "所有路由";
 "route.list.stats" = "%lld 条路由 · %lld 条已激活";
@@ -172,3 +189,9 @@
 "about.license" = "StaticRouteHelper 基于 Apache License 2.0 协议开源。";
 "about.copyright" = "版权所有 © 2021，Derek Jing";
 "about.homepage.button" = "项目主页";
+
+/* ── 数据持久化 ── */
+"persistence.save_error.title" = "无法保存更改";
+"helper.error.running_bundle_missing" = "Static Router 在运行期间被移动或删除。请退出应用，然后从 /Applications 重新打开，再重新安装辅助工具。原路径：%@";
+"helper.error.invalid_service_bundle" = "Static Router 应用包不完整，无法安全安装特权辅助工具。请重新安装或重新构建应用后重试。无效路径：%@";
+"helper.error.smappservice_requires_signature" = "SMAppService 需要由 Apple 开发团队签名的构建。本地构建必须使用 SMJobBless。";

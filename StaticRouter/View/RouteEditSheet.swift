@@ -31,6 +31,7 @@ struct RouteEditSheet: View {
 
     @State private var networkError: String? = nil
     @State private var gatewayError: String? = nil
+    @State private var saveErrorMessage: String? = nil
 
     private var prefixLengthError: String? {
         RouteValidator.isValidPrefixLength(prefixLength) ? nil : String(localized: "route.edit.field.prefix_error")
@@ -42,7 +43,6 @@ struct RouteEditSheet: View {
     }
 
     private var isEditing: Bool { existingRule != nil }
-    private var wasActive: Bool { existingRule?.isActive ?? false }
 
     // MARK: - Body
 
@@ -191,6 +191,17 @@ struct RouteEditSheet: View {
         .padding(20)
         .frame(width: 460)
         .onAppear { populateFromExisting() }
+        .alert(
+            String(localized: "persistence.save_error.title"),
+            isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )
+        ) {
+            Button(String(localized: "OK"), role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "")
+        }
     }
 
     // MARK: - Computed
@@ -249,56 +260,63 @@ struct RouteEditSheet: View {
 
         let selectedGroups = allGroups.filter { selectedGroupIDs.contains($0.id) }
 
-        if let rule = existingRule {
-            // Editing existing route
-            let networkChanged = rule.network != trimmedNetwork
-                || rule.prefixLength != prefixLength
-                || rule.gateway != trimmedGateway
-                || rule.gatewayType != gatewayType
+        do {
+            if let existingRule {
+                // Fetch a current-context instance instead of mutating a model that a
+                // long-lived sheet may have retained after a query refresh.
+                let rule = try fetchRule(id: existingRule.id)
+                let ruleWasActive = rule.isActive
+                let networkChanged = rule.network != trimmedNetwork
+                    || rule.prefixLength != prefixLength
+                    || rule.gateway != trimmedGateway
+                    || rule.gatewayType != gatewayType
 
-            rule.network = trimmedNetwork
-            rule.prefixLength = prefixLength
-            rule.gatewayType = gatewayType
-            rule.gateway = trimmedGateway
+                rule.network = trimmedNetwork
+                rule.prefixLength = prefixLength
+                rule.gatewayType = gatewayType
+                rule.gateway = trimmedGateway
+                // SwiftData owns the inverse relationship; changing both arrays by
+                // hand can leave stale relationship faults in the context.
+                rule.groups = selectedGroups
 
-            // Update group associations
-            // Remove from old groups not in new selection
-            for oldGroup in rule.groups where !selectedGroupIDs.contains(oldGroup.id) {
-                oldGroup.routes.removeAll { $0.id == rule.id }
-            }
-            // Add to new groups
-            for newGroup in selectedGroups where !rule.groups.contains(where: { $0.id == newGroup.id }) {
-                newGroup.routes.append(rule)
-            }
-            rule.groups = selectedGroups
+                try modelContext.save()
 
-            try? modelContext.save()
-
-            // Re-activate if route was active and network config changed (task 6.4)
-            if wasActive && networkChanged {
-                Task {
-                    // Deactivate old, then activate new
-                    try? await routerService.deactivateRoute(rule)
-                    try? await routerService.activateRoute(rule)
+                if ruleWasActive && networkChanged {
+                    Task {
+                        try? await routerService.deactivateRoute(rule)
+                        try? await routerService.activateRoute(rule)
+                    }
                 }
+            } else {
+                let rule = RouteRule(
+                    network: trimmedNetwork,
+                    prefixLength: prefixLength,
+                    gatewayType: gatewayType,
+                    gateway: trimmedGateway,
+                    isActive: false,
+                    groups: selectedGroups
+                )
+                modelContext.insert(rule)
+                try modelContext.save()
             }
-        } else {
-            // Adding new route
-            let rule = RouteRule(
-                network: trimmedNetwork,
-                prefixLength: prefixLength,
-                gatewayType: gatewayType,
-                gateway: trimmedGateway,
-                isActive: false,
-                groups: selectedGroups
-            )
-            modelContext.insert(rule)
-            for group in selectedGroups {
-                group.routes.append(rule)
-            }
-            try? modelContext.save()
-        }
 
-        dismiss()
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            saveErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func fetchRule(id: UUID) throws -> RouteRule {
+        let targetID = id
+        let descriptor = FetchDescriptor<RouteRule>(
+            predicate: #Predicate<RouteRule> { rule in
+                rule.id == targetID
+            }
+        )
+        guard let rule = try modelContext.fetch(descriptor).first else {
+            throw PersistenceError.objectNoLongerExists
+        }
+        return rule
     }
 }

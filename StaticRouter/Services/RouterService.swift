@@ -46,6 +46,8 @@ enum RouterError: LocalizedError {
     case helperRecoveryInProgress
     /// 自动重装流程失败
     case helperRecoveryFailed(String)
+    /// Persistent route state could not be saved
+    case persistenceFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -59,6 +61,8 @@ enum RouterError: LocalizedError {
             return "自动重装进行中，请稍候。"
         case .helperRecoveryFailed(let msg):
             return "自动重装失败：\(msg)"
+        case .persistenceFailed(let message):
+            return "无法保存路由状态：\(message)"
         }
     }
 }
@@ -109,6 +113,9 @@ final class RouterService: ObservableObject {
     private var helperStatusFallbackPollingCancellable: AnyCancellable?
     private var appDidBecomeActiveCancellable: AnyCancellable?
     private let helperStatusFallbackInterval: TimeInterval = 10
+    private let commandXPCTimeout: TimeInterval = 5
+    private let transientXPCRetryCount = 2
+    private let transientXPCRetryDelayNanoseconds: UInt64 = 200_000_000
     private var isHelperStatusFallbackEnabled = false
 
     // MARK: Init
@@ -128,6 +135,7 @@ final class RouterService: ObservableObject {
         helperStatus = Self.resolveInstallationState(
             activeMethod: helperManager.activeMethod,
             isPendingApproval: helperManager.isPendingApproval,
+            isSMAppServiceSupported: helperManager.isSMAppServiceSupported,
             constants: sharedConstants
         )
 
@@ -151,6 +159,7 @@ final class RouterService: ObservableObject {
                 let nextState = Self.resolveInstallationState(
                     activeMethod: activeMethod,
                     isPendingApproval: isPendingApproval,
+                    isSMAppServiceSupported: self.helperManager.isSMAppServiceSupported,
                     constants: self.sharedConstants
                 )
                 if self.helperStatus != nextState {
@@ -219,9 +228,14 @@ final class RouterService: ObservableObject {
             add: true
         )
         try await sendCommand(request)
-        await MainActor.run {
-            mo.isActive = true
-            try? context.save()
+        do {
+            try await MainActor.run {
+                mo.isActive = true
+                try context.save()
+            }
+        } catch {
+            await MainActor.run { context.rollback() }
+            throw RouterError.persistenceFailed(error.localizedDescription)
         }
     }
 
@@ -238,9 +252,14 @@ final class RouterService: ObservableObject {
             add: false
         )
         try await sendCommand(request)
-        await MainActor.run {
-            mo.isActive = false
-            try? context.save()
+        do {
+            try await MainActor.run {
+                mo.isActive = false
+                try context.save()
+            }
+        } catch {
+            await MainActor.run { context.rollback() }
+            throw RouterError.persistenceFailed(error.localizedDescription)
         }
     }
 
@@ -263,6 +282,7 @@ final class RouterService: ObservableObject {
         helperStatus = Self.resolveInstallationState(
             activeMethod: helperManager.activeMethod,
             isPendingApproval: helperManager.isPendingApproval,
+            isSMAppServiceSupported: helperManager.isSMAppServiceSupported,
             constants: sharedConstants
         )
         return result
@@ -275,6 +295,7 @@ final class RouterService: ObservableObject {
         helperStatus = Self.resolveInstallationState(
             activeMethod: helperManager.activeMethod,
             isPendingApproval: helperManager.isPendingApproval,
+            isSMAppServiceSupported: helperManager.isSMAppServiceSupported,
             constants: sharedConstants
         )
     }
@@ -297,6 +318,14 @@ final class RouterService: ObservableObject {
             throw RouterError.helperRecoveryFailed("当前 helper 并非由 SMAppService 管理")
         }
 
+        // Validate before removing the existing helper. If the app was moved while
+        // running, the stale process cannot safely register its bundled daemon again.
+        do {
+            try helperManager.validateSMAppServiceBundleForRegistration()
+        } catch {
+            throw RouterError.helperRecoveryFailed(error.localizedDescription)
+        }
+
         isAutoReinstallInProgress = true
         smAppServiceRecoveryState = nil
         defer { isAutoReinstallInProgress = false }
@@ -306,6 +335,7 @@ final class RouterService: ObservableObject {
             helperStatus = Self.resolveInstallationState(
                 activeMethod: helperManager.activeMethod,
                 isPendingApproval: helperManager.isPendingApproval,
+                isSMAppServiceSupported: helperManager.isSMAppServiceSupported,
                 constants: sharedConstants
             )
         } catch {
@@ -340,36 +370,109 @@ final class RouterService: ObservableObject {
 
     /// 发送 RouteWriteRequest 并等待回复
     private func sendCommandWithReply(_ request: RouteWriteRequest) async throws -> RouteWriteReply {
-        do {
-            let selectedClient: XPCClient
-            switch helperManager.activeMethod {
-            case .smJobBless:
-                selectedClient = jobBlessXPCClient
-            case .smAppService:
-                selectedClient = appServiceXPCClient
-            case nil:
-                throw RouterError.helperNotAvailable
-            }
+        let selectedClient: XPCClient
+        switch helperManager.activeMethod {
+        case .smJobBless:
+            selectedClient = jobBlessXPCClient
+        case .smAppService:
+            selectedClient = appServiceXPCClient
+        case nil:
+            throw RouterError.helperNotAvailable
+        }
 
-            return try await withCheckedThrowingContinuation { continuation in
-                selectedClient.sendMessage(request, to: SharedConstant.commandRoute) { result in
-                    switch result {
-                    case .success(let reply):
-                        continuation.resume(returning: reply)
-                    case .failure(let error):
-                        let routerError = RouterError.xpcError(error.localizedDescription)
-                        self.maybePublishSMAppServiceRecovery(for: routerError)
-                        continuation.resume(throwing: routerError)
-                    }
+        for attempt in 0...transientXPCRetryCount {
+            do {
+                return try await sendCommandAttempt(request, using: selectedClient)
+            } catch let xpcError as XPCError {
+                if isTransientXPCError(xpcError), attempt < transientXPCRetryCount {
+                    // SecureXPC drops its cached connection when it receives an
+                    // interruption/invalid event. The next send creates a fresh
+                    // connection, but launchd may need a moment to restart the helper.
+                    try? await Task.sleep(nanoseconds: transientXPCRetryDelayNanoseconds)
+                    continue
+                }
+
+                let routerError = RouterError.xpcError(xpcErrorDescription(xpcError))
+                maybePublishSMAppServiceRecovery(for: routerError)
+                throw routerError
+            } catch let routerError as RouterError {
+                maybePublishSMAppServiceRecovery(for: routerError)
+                throw routerError
+            } catch {
+                let routerError = RouterError.xpcError(error.localizedDescription)
+                maybePublishSMAppServiceRecovery(for: routerError)
+                throw routerError
+            }
+        }
+
+        // The loop always returns or throws. This keeps the compiler's control-flow
+        // analysis explicit if the retry count changes in the future.
+        throw RouterError.xpcError("Helper connection retry failed.")
+    }
+
+    private func sendCommandAttempt(
+        _ request: RouteWriteRequest,
+        using client: XPCClient
+    ) async throws -> RouteWriteReply {
+        try await withCheckedThrowingContinuation { continuation in
+            let lock = NSLock()
+            var finished = false
+
+            let finish: (Result<RouteWriteReply, Error>) -> Void = { result in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !finished else { return }
+                finished = true
+
+                switch result {
+                case .success(let reply):
+                    continuation.resume(returning: reply)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
                 }
             }
-        } catch let routerErr as RouterError {
-            maybePublishSMAppServiceRecovery(for: routerErr)
-            throw routerErr
-        } catch {
-            let routerError = RouterError.xpcError(error.localizedDescription)
-            maybePublishSMAppServiceRecovery(for: routerError)
-            throw routerError
+
+            let timeoutWorkItem = DispatchWorkItem {
+                finish(.failure(RouterError.xpcError(
+                    "Helper did not respond within \(Int(self.commandXPCTimeout)) seconds. Repair the helper in Settings."
+                )))
+            }
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + commandXPCTimeout,
+                execute: timeoutWorkItem
+            )
+
+            client.sendMessage(request, to: SharedConstant.commandRoute) { result in
+                timeoutWorkItem.cancel()
+                switch result {
+                case .success(let reply):
+                    finish(.success(reply))
+                case .failure(let error):
+                    finish(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func isTransientXPCError(_ error: XPCError) -> Bool {
+        switch error {
+        case .connectionInvalid, .connectionInterrupted, .terminationImminent:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func xpcErrorDescription(_ error: XPCError) -> String {
+        switch error {
+        case .connectionInvalid:
+            return "The helper connection is unavailable."
+        case .connectionInterrupted:
+            return "The helper connection was interrupted."
+        case .terminationImminent:
+            return "The helper is restarting."
+        default:
+            return String(describing: error)
         }
     }
 
@@ -409,6 +512,13 @@ final class RouterService: ObservableObject {
     private func sendCommand(_ request: RouteWriteRequest) async throws {
         let reply = try await sendCommandWithReply(request)
         if !reply.success {
+            // A delete request can succeed in the helper while its XPC reply is
+            // lost. A reconnect retry then correctly reports that the route no
+            // longer exists; that already matches the requested final state.
+            if !request.add,
+               reply.errorMessage?.localizedCaseInsensitiveContains("Route not found") == true {
+                return
+            }
             throw RouterError.routeWriteFailed(reply.errorMessage ?? "Unknown error")
         }
     }
@@ -419,6 +529,7 @@ final class RouterService: ObservableObject {
         let nextState = Self.resolveInstallationState(
             activeMethod: helperManager.activeMethod,
             isPendingApproval: helperManager.isPendingApproval,
+            isSMAppServiceSupported: helperManager.isSMAppServiceSupported,
             constants: sharedConstants
         )
         DispatchQueue.main.async {
@@ -590,6 +701,7 @@ final class RouterService: ObservableObject {
     private static func resolveInstallationState(
         activeMethod: InstallMethod?,
         isPendingApproval: Bool,
+        isSMAppServiceSupported: Bool,
         constants: SharedConstant
     ) -> HelperToolInstallationState {
         switch activeMethod {
@@ -601,7 +713,10 @@ final class RouterService: ObservableObject {
         case .smAppService:
             // SMAppService uses the bundled binary. If approval is still pending,
             // expose explicit pendingActivation state instead of notInstalled.
-            return isPendingApproval ? .pendingActivation : .installed
+            if isPendingApproval {
+                return .pendingActivation
+            }
+            return isSMAppServiceSupported ? .installed : .notCompatible
         case .smJobBless:
             do {
                 let infoPropertyList = try HelperToolInfoPropertyList(from: constants.blessedLocation)

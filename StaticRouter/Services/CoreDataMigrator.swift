@@ -27,18 +27,31 @@ enum CoreDataMigrator {
         guard let storeURL = legacyStoreURL() else { return }
         guard FileManager.default.fileExists(atPath: storeURL.path) else { return }
 
-        print("[Migration] 检测到旧 Core Data 存储，开始迁移...")
+        print("[Migration] Found legacy Core Data store; starting migration.")
 
-        let legacyRoutes = readLegacyRoutes(storeURL: storeURL)
-        if !legacyRoutes.isEmpty {
-            importRoutes(legacyRoutes, into: context)
-            print("[Migration] 已导入 \(legacyRoutes.count) 条路由。")
-        } else {
-            print("[Migration] 旧存储为空，跳过导入。")
+        do {
+            let legacyRoutes = try readLegacyRoutes(storeURL: storeURL)
+            if !legacyRoutes.isEmpty {
+                let importedCount = try importRoutes(legacyRoutes, into: context)
+                print("[Migration] Imported \(importedCount) new routes.")
+            } else {
+                print("[Migration] Legacy store is empty.")
+            }
+        } catch {
+            context.rollback()
+            // Never destroy the source store when loading, decoding, or saving failed.
+            print("[Migration] Migration failed; legacy store was preserved: \(error)")
+            return
         }
 
-        deleteLegacyStore(storeURL: storeURL)
-        print("[Migration] 旧 Core Data 存储已删除，迁移完成。")
+        do {
+            try deleteLegacyStore(storeURL: storeURL)
+            print("[Migration] Removed legacy store after successful migration.")
+        } catch {
+            // Imported routes are retained; the idempotent import makes a later
+            // retry safe if the source files could not be removed this time.
+            print("[Migration] Routes were imported, but the legacy store could not be removed: \(error)")
+        }
     }
 
     // MARK: - Private
@@ -59,12 +72,11 @@ enum CoreDataMigrator {
     }
 
     /// 读取旧 Core Data 中的路由数据（JSON blob）
-    private static func readLegacyRoutes(storeURL: URL) -> [LegacyRouteData] {
+    private static func readLegacyRoutes(storeURL: URL) throws -> [LegacyRouteData] {
         // 临时构建一个不持久化到现有路径的 NSPersistentContainer 读取旧数据
         guard let modelURL = Bundle.main.url(forResource: "DataModel", withExtension: "momd"),
               let model = NSManagedObjectModel(contentsOf: modelURL) else {
-            print("[Migration] 找不到旧 Core Data 模型（DataModel.momd），跳过迁移。")
-            return []
+            throw MigrationError.legacyModelUnavailable
         }
 
         let container = NSPersistentContainer(name: "DataModel", managedObjectModel: model)
@@ -72,37 +84,42 @@ enum CoreDataMigrator {
         description.isReadOnly = true
         container.persistentStoreDescriptions = [description]
 
-        var routes: [LegacyRouteData] = []
+        var loadError: Error?
         let semaphore = DispatchSemaphore(value: 0)
         container.loadPersistentStores { _, error in
             defer { semaphore.signal() }
-            if let error {
-                print("[Migration] 加载旧存储失败：\(error)，跳过迁移。")
-                return
-            }
+            loadError = error
         }
         semaphore.wait()
+        if let loadError { throw loadError }
 
         let fetchRequest = NSFetchRequest<NSManagedObject>(entityName: "RouteData")
-        do {
-            let objects = try container.viewContext.fetch(fetchRequest)
-            let decoder = JSONDecoder()
-            for obj in objects {
-                if let data = obj.value(forKey: "values") as? Data {
-                    if let list = try? decoder.decode([LegacyRouteData].self, from: data) {
-                        routes.append(contentsOf: list)
-                    }
-                }
+        let objects = try container.viewContext.fetch(fetchRequest)
+        let decoder = JSONDecoder()
+        var routes: [LegacyRouteData] = []
+        for object in objects {
+            guard let data = object.value(forKey: "values") as? Data else {
+                throw MigrationError.invalidLegacyRecord
             }
-        } catch {
-            print("[Migration] 读取旧数据失败：\(error)")
+            routes.append(contentsOf: try decoder.decode([LegacyRouteData].self, from: data))
         }
 
         return routes
     }
 
     /// 将旧路由数据导入 SwiftData（isActive = false，groups = 空）
-    private static func importRoutes(_ routes: [LegacyRouteData], into context: ModelContext) {
+    private static func importRoutes(_ routes: [LegacyRouteData], into context: ModelContext) throws -> Int {
+        let existingRoutes = try context.fetch(FetchDescriptor<RouteRule>())
+        var identities = Set(existingRoutes.map {
+            RouteIdentity(
+                network: $0.network,
+                prefixLength: $0.prefixLength,
+                gatewayType: $0.gatewayType.rawValue,
+                gateway: $0.gateway
+            )
+        })
+        var importedCount = 0
+
         for legacy in routes {
             // 将子网掩码转换为前缀长度
             let prefixLength = prefixLengthFromMask(legacy.mask)
@@ -117,6 +134,14 @@ enum CoreDataMigrator {
                 gateway = legacy.gateway
             }
 
+            let identity = RouteIdentity(
+                network: legacy.network,
+                prefixLength: prefixLength,
+                gatewayType: gatewayType.rawValue,
+                gateway: gateway
+            )
+            guard identities.insert(identity).inserted else { continue }
+
             let rule = RouteRule(
                 network: legacy.network,
                 prefixLength: prefixLength,
@@ -125,22 +150,20 @@ enum CoreDataMigrator {
                 isActive: false
             )
             context.insert(rule)
+            importedCount += 1
         }
-        do {
-            try context.save()
-        } catch {
-            print("[Migration] 保存导入数据失败：\(error)")
-        }
+        try context.save()
+        return importedCount
     }
 
     /// 删除旧 Core Data 存储及相关文件（.sqlite, -wal, -shm）
-    private static func deleteLegacyStore(storeURL: URL) {
+    private static func deleteLegacyStore(storeURL: URL) throws {
         let fm = FileManager.default
         let extensions = ["", "-wal", "-shm"]
         for ext in extensions {
             let url = URL(fileURLWithPath: storeURL.path + ext)
             if fm.fileExists(atPath: url.path) {
-                try? fm.removeItem(at: url)
+                try fm.removeItem(at: url)
             }
         }
     }
@@ -152,4 +175,25 @@ enum CoreDataMigrator {
         let combined: UInt32 = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
         return combined.nonzeroBitCount
     }
+}
+
+private enum MigrationError: LocalizedError {
+    case legacyModelUnavailable
+    case invalidLegacyRecord
+
+    var errorDescription: String? {
+        switch self {
+        case .legacyModelUnavailable:
+            return "DataModel.momd is missing from the application bundle."
+        case .invalidLegacyRecord:
+            return "A legacy RouteData record has no decodable values payload."
+        }
+    }
+}
+
+private struct RouteIdentity: Hashable {
+    let network: String
+    let prefixLength: Int
+    let gatewayType: String
+    let gateway: String
 }

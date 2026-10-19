@@ -26,6 +26,7 @@ struct RouteListView: View {
     @State private var routeToAssignGroups: RouteRule? = nil
     @State private var activationError: RouterError? = nil
     @State private var showActivationError = false
+    @State private var saveErrorMessage: String? = nil
 
     // MARK: - Computed
 
@@ -134,6 +135,17 @@ struct RouteListView: View {
         } message: {
             let fallback = String(localized: "route.list.recovery.alert.message")
             Text(routerService.smAppServiceRecoveryState?.errorMessage ?? fallback)
+        }
+        .alert(
+            String(localized: "persistence.save_error.title"),
+            isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )
+        ) {
+            Button(String(localized: "OK"), role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "")
         }
     }
 
@@ -246,15 +258,20 @@ struct RouteListView: View {
 
     private func performDelete(_ rule: RouteRule) {
         Task {
-            if rule.isActive {
-                try? await routerService.deactivateRoute(rule)
-                rule.isActive = false
+            do {
+                if rule.isActive {
+                    try await routerService.deactivateRoute(rule)
+                    rule.isActive = false
+                }
+                modelContext.delete(rule)
+                try modelContext.save()
+            } catch let error as RouterError {
+                activationError = error
+                showActivationError = true
+            } catch {
+                modelContext.rollback()
+                saveErrorMessage = error.localizedDescription
             }
-            for group in rule.groups {
-                group.routes.removeAll { $0.id == rule.id }
-            }
-            modelContext.delete(rule)
-            try? modelContext.save()
         }
     }
 
@@ -309,6 +326,7 @@ struct RouteToggle: View {
     let routerService: RouterService
     let onError: (RouterError) -> Void
 
+    @Environment(\.modelContext) private var modelContext
     @State private var isLoading = false
 
     var body: some View {
@@ -335,10 +353,12 @@ struct RouteToggle: View {
                 try await routerService.deactivateRoute(rule)
                 rule.isActive = false
             }
+            try modelContext.save()
         } catch let error as RouterError {
             onError(error)
         } catch {
-            onError(.xpcError(error.localizedDescription))
+            modelContext.rollback()
+            onError(.persistenceFailed(error.localizedDescription))
         }
     }
 }
